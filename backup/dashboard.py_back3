@@ -1,0 +1,248 @@
+import boto3
+
+cloudwatch = boto3.client('cloudwatch', region_name='us-east-2')
+s3client=boto3.client('s3', region_name='us-east-2')
+lambdaclient = boto3.client('lambda', region_name='us-east-2')
+
+complexity = 3
+
+#get BucketSizeBytes, NumberOfObjects, PutRequests of every bucket, store to size_dict, object_dict, active_dict
+from datetime import datetime, timedelta
+seconds_in_one_day = 86400  # used for granularity
+size_dict = {}
+object_dict={}
+active_dict={}
+for bucket in s3client.list_buckets()["Buckets"]:
+  bucket_name = bucket['Name']  
+  bucket_size = cloudwatch.get_metric_statistics(
+    Namespace='AWS/S3',
+    Dimensions=[
+        {
+            'Name': 'BucketName',
+            'Value': bucket_name
+        },
+        {
+            'Name': 'StorageType',
+            'Value': 'StandardStorage'
+        }
+    ],
+    MetricName='BucketSizeBytes',
+    StartTime=datetime.now() - timedelta(days=2),
+    EndTime=datetime.now(),
+    Period=seconds_in_one_day,
+    Statistics=[
+        'Average'
+    ],
+    Unit='Bytes'
+  )
+
+  bucket_object = cloudwatch.get_metric_statistics(
+    Namespace='AWS/S3',
+    Dimensions=[
+        {
+            'Name': 'BucketName',
+            'Value': bucket_name
+        },
+        {
+            'Name': 'StorageType',
+            'Value': 'AllStorageTypes'
+        }
+    ],
+    MetricName='NumberOfObjects',
+    StartTime=datetime.now() - timedelta(days=2),
+    EndTime=datetime.now(),
+    Period=seconds_in_one_day,
+    Statistics=[
+        'Average'
+    ],
+    Unit='Count'
+  )
+
+  bucket_active = cloudwatch.get_metric_statistics(
+    Namespace='AWS/S3',
+    Dimensions=[
+        {
+            'Name': 'BucketName',
+            'Value': bucket_name
+        },
+        {
+            'Name': 'FilterId',
+            'Value': 'EntireBucket'
+        }
+    ],
+    MetricName='PutRequests',
+    StartTime=datetime.now() - timedelta(days=2),
+    EndTime=datetime.now(),
+    Period=seconds_in_one_day,
+    Statistics=[
+        'Sum'
+    ],
+    Unit='Count'
+  )
+  if bucket_size['Datapoints']:
+   size_dict[bucket_name]= bucket_size['Datapoints'][0]['Average']
+  if bucket_object['Datapoints']:
+   object_dict[bucket_name]=bucket_object['Datapoints'][0]['Average']
+  if bucket_active['Datapoints']:
+   active_dict[bucket_name]=bucket_active['Datapoints'][0]['Sum']
+
+#save names of buckets sorted by size to sort_size_list
+sort_size_list=[]
+listik =[]
+for n in size_dict:
+  listik.append(float(size_dict[n]))
+listik.sort(reverse=True)
+for i in range(len(size_dict)):
+ for n in size_dict:
+  if float(size_dict[n])==listik[i]:
+   if n not in sort_size_list: 
+    sort_size_list.append(n)
+
+#save names of buckets sorted by object count to sort_object_list
+listik =[]
+sort_object_list=[]
+for n in object_dict:
+  listik.append(float(object_dict[n]))
+listik.sort(reverse=True)
+for i in range(len(object_dict)):
+ for n in object_dict:
+  if float(object_dict[n])==listik[i]:
+   if n not in sort_object_list: 
+    sort_object_list.append(n) 
+
+#decrease sorted lists in accordance to specified complexity
+complex_sort_object_list=[]
+complex_sort_size_list=[]
+for i in range(complexity):
+ complex_sort_object_list.append(sort_object_list[i])
+ complex_sort_size_list.append(sort_size_list[i])
+
+#save names of buckets sorted by PutRequests to object_sort_active_list and size_sort_active_list
+listik =[]
+size_sort_active_list=[]
+object_sort_active_list=[]
+for n in active_dict:
+  listik.append(float(active_dict[n]))
+listik.sort(reverse=True)
+for i in range(len(active_dict)):
+ for n in active_dict:
+  if float(active_dict[n])==listik[i]:
+   if n not in size_sort_active_list:
+    if n not in complex_sort_size_list:
+     size_sort_active_list.append(n)
+  if n not in object_sort_active_list:
+    if n not in complex_sort_object_list:
+     object_sort_active_list.append(n)
+
+#get list of functions 
+invocations_dict={}
+for function in lambdaclient.list_functions()['Functions']:  #(MasterRegion='us-east-2',FunctionVersion='ALL',MaxItems=123)['Functions']:
+ function_name = function['FunctionName']
+ invocations = cloudwatch.get_metric_statistics(
+    Namespace='AWS/Lambda',
+    Dimensions=[
+        {
+            'Name': 'FunctionName',
+            'Value': function_name
+        }
+    ],
+    MetricName='Invocations',
+    StartTime=datetime.now() - timedelta(days=2),
+    EndTime=datetime.now(),
+    Period=seconds_in_one_day,
+    Statistics=[
+        'Sum'
+    ],
+    Unit='Count'
+ )
+ if invocations['Datapoints']:
+   invocations_dict[function_name]= invocations['Datapoints'][0]['Sum']
+
+#save names of functions sorted by Invocations count  to sort_invoke_list
+sort_invocations_list=[]
+listik =[]
+for n in invocations_dict:
+  listik.append(float(invocations_dict[n]))
+listik.sort(reverse=True)
+for i in range(len(invocations_dict)):
+ for n in invocations_dict:
+  if float(invocations_dict[n])==listik[i]:
+   if n not in sort_invocations_list:
+    sort_invocations_list.append(n)
+
+functions_most_active = ''
+if sort_invocations_list:
+ i=0
+ while i <len(sort_invocations_list) and i<complexity:
+  functions_most_active+= ',["...","' + sort_invocations_list[i] + '",{"period":86400}]'
+  i+=1
+
+#put buckets total count custom metric to CloudWatch
+buckets_count=  len(s3client.list_buckets()['Buckets'])
+response = cloudwatch.put_metric_data(
+    Namespace='Custom metrics',
+    MetricData=[
+        {
+            'MetricName': 'Buckets-total-count',
+            'Dimensions': [
+                {
+                    'Name': 'S3 Buckets',
+                    'Value': 'all buckets'
+                },
+            ],
+            'Value': float(buckets_count),
+            'StorageResolution': 60
+        },
+    ]
+)
+
+#creating widget_buckets_total DashboardBody string
+widget_buckets_total = '{"type":"metric","x":12,"y":0,"width":6,"height":3,"properties":{"metrics":[["Custom metrics","Buckets-total-count","S3 Buckets","all buckets",{"period":86400,"label":"Buckets total"}]],"view":"singleValue","stacked":false,"region":"us-east-2","title":"Buckets total"}},'
+
+#creating widget_top_buckets_size DashboardBody string
+widget_top_buckets_size=''
+buckets_size_metrics = ''
+size_most_active = ''
+if sort_size_list:
+ i=0
+ while i < len(sort_size_list) and i< complexity:
+  buckets_size_metrics += '["AWS/S3","BucketSizeBytes","StorageType","StandardStorage","BucketName","' + sort_size_list[i] + '",{"period":86400}],'
+  i+=1
+ buckets_size_metrics=buckets_size_metrics[:-1]
+ i=0
+ if size_sort_active_list:
+  while i < len(size_sort_active_list) and i< complexity:
+   size_most_active+= ',["...","' + size_sort_active_list[i] + '",{"period":86400}]'
+   i+=1
+ widget_top_buckets_size = '{"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"view":"timeSeries","stacked":false,"region":"us-east-2","metrics":['+buckets_size_metrics + size_most_active + '],"start":"-P3D","end":"P0D","legend":{"position":"right"},"title":"Top Buckets (size)"}},'
+
+#creating widget_top_buckets_count DashboardBody string 
+widget_top_buckets_count=''
+buckets_object_metrics = ''
+object_most_active = ''
+if sort_object_list:
+ i=0
+ while i < len(sort_object_list) and i< complexity:
+  buckets_object_metrics += '["AWS/S3","NumberOfObjects","StorageType","AllStorageTypes","BucketName","' + sort_object_list[i] + '",{"period":86400}],'
+  i+=1
+ buckets_object_metrics=buckets_object_metrics[:-1]
+ i=0
+ if object_sort_active_list:
+  while i < len(object_sort_active_list) and i< complexity:
+   object_most_active+= ',["...","' + object_sort_active_list[i] + '",{"period":86400}]'
+   i+=1
+ widget_top_buckets_count = '{"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"view":"timeSeries","stacked":false,"metrics":['+buckets_object_metrics+ object_most_active + '],"region":"us-east-2","legend":{"position":"right"},"title":"Top Buckets (count)"}}' #set a comma in the end before ' if it is not the last widget
+
+#put dashboard to CloudWatch
+response = cloudwatch.put_dashboard(
+   DashboardName = 'DevOps-Dashboard',
+   DashboardBody = '{"widgets":['+ widget_buckets_total+ widget_top_buckets_size +widget_top_buckets_count+']}'
+)
+
+"""
+'{"widgets":[{"type":"metric","x":12,"y":0,"width":6,"height":3,"properties":{"metrics":[["Custom metrics","Buckets-total-count","S3 Buckets","all buckets",{"period":86400,"label":"Buckets total"}]],"view":"singleValue","stacked":false,"region":"us-east-2","title":"Buckets total"}},{"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"view":"timeSeries","stacked":false,"region":"us-east-2","metrics":[["AWS/S3","BucketSizeBytes","StorageType","StandardStorage","BucketName","' + sort_size_list[0] + '",{"period":86400}],["...","' + sort_size_list[1] + '",{"period":86400}],["...","' + sort_size_list[2] + '",{"period":86400}]' + size_most_active + '],"start":"-P3D","end":"P0D","legend":{"position":"right"},"title":"Top Buckets (size)"}},{"type":"metric","x":0,"y":6,"width":12,"height":6,"properties":{"view":"timeSeries","stacked":false,"metrics":[["AWS/S3","NumberOfObjects","StorageType","AllStorageTypes","BucketName","' + sort_object_list[0] + '",{"period":86400}],["...","' + sort_object_list[1] + '",{"period":86400}],["...","' + sort_object_list[2] + '",{"period":86400}]' + object_most_active + '],"region":"us-east-2","legend":{"position":"right"},"title":"Top Buckets (count)"}}]}'
+)
+"""
+
+
+

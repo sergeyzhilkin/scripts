@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "test", line 8, in <module>
+    print(sum(c, d))
+  File "test", line 5, in sum
+    raise TypeError()
+TypeError

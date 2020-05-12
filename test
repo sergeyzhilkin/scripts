@@ -1,0 +1,7 @@
+from cfn_flip import load_yaml, dump_yaml
+def get_cf_template_body():
+    text = open(template_file).read()
+    raw_yaml = load_yaml(text)
+    template = dump_yaml(raw_yaml)
+    return template
+

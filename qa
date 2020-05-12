@@ -1,0 +1,733 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Deploy a service on AWS Fargate, hosted in a public subnet. It is internally\
+  \ accessible by ECS Service Discovery.\nIf it is an external service it will be\
+  \ accessible by load balancer\n"
+Parameters:
+  Target:
+    Type: String
+    Description: target env
+    AllowedValues:
+      - qa
+      - prod
+  ParentNetStackName:
+    Type: String
+    Default: ''
+    Description: The name of the parent Fargate networking stack that you created.
+      Necessary to locate and reference resources created by that stack.
+  StackTagName:
+    Type: String
+    Description: The stack name used for tagging.
+  ParentDBStackName:
+    Type: String
+    Default: ''
+    Description: The name of the parent Fargate DB stack that you created. Necessary
+      to locate and reference resources created by that stack.
+  ContainerImageUrl:
+    Type: String
+    MinLength: 4
+    Description: The URL to the Docker image that will handle traffic to this service.
+  LogGroup:
+    Type: String
+    MinLength: 2
+    Description: The log group for container - typically different per environment
+      dev, prod etc
+  ContainerCpu:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 512
+    Description: How much memory in megabytes to give the container
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the service task to run
+  CaregiverPortalProfile:
+    Type: String
+    Default: local
+    Description: Caregiver Portal Application Profile
+  Role:
+    Type: String
+    Default: ''
+    Description: (Optional) An IAM role to give the service's containers if the code
+      within needs to access other AWS resources like S3 buckets, DynamoDB tables,
+      etc
+  ServiceName:
+    Type: String
+    MinLength: 4
+    Description: A name for the service. Service name determines internal dns url
+      - for example avs-proxy as servicename = avs-proxy.lifepod-dev for dev-net stack
+  ContainerPorts:
+    Type: List<Number>
+    Default: '8080'
+    Description: Currently up to two ports supported will only check first and second
+      index. AVS proxy requires 443 for external network load balancer and 8080 for
+      internal. Most services may only have one port.
+  NumberOfContainerPorts:
+    Type: Number
+    AllowedValues:
+      - 1
+      - 2
+    Description: No easy way to get container port length via cloudformation funciton
+      required to avoid index out of array exception when setting task definition
+      port mapping
+  ContainerLoadBalancerPort:
+    Type: Number
+    Default: 8080
+    Description: >-
+      Only used if service is external. Specific port to forward from load balancer
+      target group given a container can have more than port see prior parameter.
+      Note if an external service container port only has one port, the value in container
+      ports in array will be same as this value
+  ExternalService:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Description: If it is an external service then target group will be registered
+      to public load balancer
+  ExternalServiceLoadBalancerType:
+    Type: String
+    Default: none
+    AllowedValues:
+      - application
+      - network
+      - none
+    Description: If it is an external service then target group will be registered
+      to public load balancer
+  ALBTargetGroupHealthCheckPath:
+    Type: String
+    Default: /health
+    Description: The health check HTTP path for the application load balancer target
+      group.
+  ALBForwardPath:
+    Type: String
+    Default: '*'
+    Description: A path on the application load balancer that this service should
+      be connected to. Use * to send all load balancer traffic to this service.
+  ALBPriority:
+    Type: Number
+    Default: 1
+    Description: The priority for the routing rule added to the load balancer. This
+      only applies if your have multiple services which have been assigned to different
+      paths on the load balancer.
+  HostedZoneName:
+    Type: String
+    Default: lifepod.com.
+    Description: Hosted zone name is required for creating route 53 record set if
+      service is external
+  RecordSetName:
+    Type: String
+    Default: ''
+    Description: Record set name for automatic route 53 update if service is external
+  SSLCertificateARN:
+    Type: String
+    Default: arn:aws:acm:us-east-1:031976339972:certificate/92d4ba34-74b7-4dec-bdd4-e5b14fc63295
+    Description: Wildcard cert arn for lifepod.com services. For use with an application
+      load balancer
+  HasDBAccess:
+    Type: String
+    AllowedValues:
+      - true
+      - false
+    Description: Determines if service has access to db environment variables
+  SecretsArn:
+    Type: String
+    Default: ''
+    Description: Secret Resource Name
+  EndpointUserAuth:
+    Type: String
+    Default: ''
+    Description: Endpoint for UserAuth
+  EndpointEventStore:
+    Type: String
+    Default: ''
+    Description: Endpoint for EventStore
+  EndpointDialogManager:
+    Type: String
+    Default: ''
+    Description: Endpoint for DialogManager
+  EndpointPublicUserAuth:
+    Type: String
+    Default: ''
+    Description: Endpoint for Public User Auth
+  EndpointRoutine:
+    Type: String
+    Default: ''
+    Description: Endpoint for Routine
+  EndpointScheduledReport:
+    Type: String
+    Default: ''
+    Description: Endpoint for Scheduled Report
+  EndpointPublicCaregiverPortal:
+    Type: String
+    Default: ''
+    Description: Endpoint for Public CaregiverPortal Report
+  S3AccessKey:
+    Type: String
+    Default: ''
+    Description: S3 Access key
+  S3SecretKey:
+    Type: String
+    Default: ''
+    Description: S3 Secret key
+  DockerHealthCheckCommand:
+    Type: String
+    Description: Healthcheck for fargate containers
+Conditions:
+  HasCustomRole: !Not
+    - !Equals
+      - !Ref 'Role'
+      - ''
+  CreateNetworkLoadBalancerResources: !And
+    - !Equals
+      - !Ref 'ExternalService'
+      - true
+    - !Equals
+      - !Ref 'ExternalServiceLoadBalancerType'
+      - network
+  CreateApplicationLoadBalancerResources: !And
+    - !Equals
+      - !Ref 'ExternalService'
+      - true
+    - !Equals
+      - !Ref 'ExternalServiceLoadBalancerType'
+      - application
+  InternalService: !Equals
+    - !Ref 'ExternalService'
+    - false
+  ContainerPortsEqualsTwo: !Equals
+    - !Ref 'NumberOfContainerPorts'
+    - 2
+  HasDBAccess: !Equals
+    - !Ref 'HasDBAccess'
+    - true
+Resources:
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref 'ServiceName'
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - ECSTaskExecutionRole
+      TaskRoleArn: !If
+        - HasCustomRole
+        - !Ref 'Role'
+        - !Ref 'AWS::NoValue'
+      ContainerDefinitions:
+        - Name: !Ref 'ServiceName'
+          Image: !Ref 'ContainerImageUrl'
+          Ulimits:
+            - Name: nofile
+              HardLimit: 1000000
+              SoftLimit: 1000000
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Ref 'DockerHealthCheckCommand'
+            Interval: 10
+            Retries: 3
+            StartPeriod: 15
+            Timeout: 5
+          Environment: !If
+            - HasDBAccess
+            - - Name: DB_HOST
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentDBStackName'
+                      - MasterDBEndpoint
+              - Name: DB_HOST_SLAVE
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentDBStackName'
+                      - SlaveDBEndpoint
+              - Name: DB_NAME
+                Value: userauth
+              - Name: DB_PORT
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentDBStackName'
+                      - Port
+              - Name: DB_USER
+                Value: !Join
+                  - ''
+                  - - '{{resolve:secretsmanager:'
+                    - !Ref 'SecretsArn'
+                    - :SecretString:DB_USER}}
+              - Name: DB_PASSWORD
+                Value: !Join
+                  - ''
+                  - - '{{resolve:secretsmanager:'
+                    - !Ref 'SecretsArn'
+                    - :SecretString:DB_PASSWORD}}
+              - Name: USER_AUTH_DB_HOST
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentDBStackName'
+                      - MasterDBEndpoint
+              - Name: USER_AUTH_DB_PORT
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentDBStackName'
+                      - Port
+              - Name: USER_AUTH_DB_NAME
+                Value: userauth
+              - Name: USER_AUTH_DB_USER
+                Value: !Join
+                  - ''
+                  - - '{{resolve:secretsmanager:'
+                    - !Ref 'SecretsArn'
+                    - :SecretString:DB_USER}}
+              - Name: USER_AUTH_DB_PASSWORD
+                Value: !Join
+                  - ''
+                  - - '{{resolve:secretsmanager:'
+                    - !Ref 'SecretsArn'
+                    - :SecretString:DB_PASSWORD}}
+              - Name: ROUTINE_DB_HOST
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentDBStackName'
+                      - MasterDBEndpoint
+              - Name: ROUTINE_DB_PORT
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentDBStackName'
+                      - Port
+              - Name: ROUTINE_DB_NAME
+                Value: routine
+              - Name: ROUTINE_DB_USER
+                Value: !Join
+                  - ''
+                  - - '{{resolve:secretsmanager:'
+                    - !Ref 'SecretsArn'
+                    - :SecretString:DB_USER}}
+              - Name: ROUTINE_DB_PASSWORD
+                Value: !Join
+                  - ''
+                  - - '{{resolve:secretsmanager:'
+                    - !Ref 'SecretsArn'
+                    - :SecretString:DB_PASSWORD}}
+              - Name: SPRING_PROFILES_ACTIVE
+                Value: !Ref 'Target'
+              - Name: DDL_AUTO
+                Value: none
+              - Name: LIFEPOD_PRIVATE_DOMAIN
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentNetStackName'
+                      - PrivateDnsNamespaceName
+              - Name: ENDPOINT_USER_AUTH
+                Value: !Ref 'EndpointUserAuth'
+              - Name: ENDPOINT_EVENT_STORE
+                Value: !Ref 'EndpointEventStore'
+              - Name: ENDPOINT_DIALOG_MANAGER
+                Value: !Ref 'EndpointDialogManager'
+              - Name: ENDPOINT_PUBLIC_USER_AUTH
+                Value: !Ref 'EndpointPublicUserAuth'
+              - Name: ENDPOINT_ROUTINE
+                Value: !Ref 'EndpointRoutine'
+              - Name: ENDPOINT_SCHEDULED_REPORT
+                Value: !Ref 'EndpointScheduledReport'
+              - Name: ENDPOINT_PUBLIC_CAREGIVER_PORTAL
+                Value: !Ref 'EndpointPublicCaregiverPortal'
+            - - Name: LIFEPOD_PRIVATE_DOMAIN
+                Value: !ImportValue
+                  Fn::Join:
+                    - ':'
+                    - - !Ref 'ParentNetStackName'
+                      - PrivateDnsNamespaceName
+              - Name: ENDPOINT_USER_AUTH
+                Value: !Ref 'EndpointUserAuth'
+              - Name: ENDPOINT_EVENT_STORE
+                Value: !Ref 'EndpointEventStore'
+              - Name: ENDPOINT_DIALOG_MANAGER
+                Value: !Ref 'EndpointDialogManager'
+              - Name: ENDPOINT_PUBLIC_USER_AUTH
+                Value: !Ref 'EndpointPublicUserAuth'
+              - Name: ENDPOINT_ROUTINE
+                Value: !Ref 'EndpointRoutine'
+              - Name: ENDPOINT_SCHEDULED_REPORT
+                Value: !Ref 'EndpointScheduledReport'
+              - Name: ENDPOINT_PUBLIC_CAREGIVER_PORTAL
+                Value: !Ref 'EndpointPublicCaregiverPortal'
+              - Name: SPRING_PROFILES_ACTIVE
+                Value: !Ref 'Target'
+              - Name: LOCAL_LOGIN_ENABLED
+                Value: false
+          PortMappings: !If
+            - ContainerPortsEqualsTwo
+            - - ContainerPort: !Select
+                  - 0
+                  - !Ref 'ContainerPorts'
+              - ContainerPort: !Select
+                  - 1
+                  - !Ref 'ContainerPorts'
+            - - ContainerPort: !Select
+                  - 0
+                  - !Ref 'ContainerPorts'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Join
+                - /
+                - - /ecs
+                  - !Ref 'LogGroup'
+              awslogs-region: us-east-1
+              awslogs-stream-prefix: !Ref 'ServiceName'
+          Essential: true
+        - Name: datadog-agent
+          Image: datadog/agent:latest
+          Cpu: '10'
+          Memory: '256'
+          Environment:
+            - Name: DD_API_KEY
+              Value: !Join
+                - ''
+                - - '{{resolve:secretsmanager:'
+                  - !Ref 'SecretsArn'
+                  - :SecretString:DD_API_KEY}}
+            - Name: ECS_FARGATE
+              Value: true
+  ExternalNetworkLoadBalancerService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - NetworkLoadBalancerTargetListener
+    Condition: CreateNetworkLoadBalancerResources
+    Properties:
+      ServiceName: !Ref 'ServiceName'
+      HealthCheckGracePeriodSeconds: 30
+      Cluster: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - ClusterName
+      LaunchType: FARGATE
+      ServiceRegistries:
+        - RegistryArn: !GetAtt 'ServiceDiscoveryRecord.Arn'
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: !Ref 'DesiredCount'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - FargateContainerSecurityGroup
+          Subnets:
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - PublicSubnetOne
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - PublicSubnetTwo
+      TaskDefinition: !Ref 'TaskDefinition'
+      LoadBalancers:
+        - ContainerName: !Ref 'ServiceName'
+          ContainerPort: !Ref 'ContainerLoadBalancerPort'
+          TargetGroupArn: !Ref 'NetworkLoadBalancerTargetGroup'
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: CreateNetworkLoadBalancerResources
+    Properties:
+      Scheme: internet-facing
+      Type: network
+      Subnets:
+        - !ImportValue
+          Fn::Join:
+            - ':'
+            - - !Ref 'ParentNetStackName'
+              - PublicSubnetOne
+        - !ImportValue
+          Fn::Join:
+            - ':'
+            - - !Ref 'ParentNetStackName'
+              - PublicSubnetTwo
+      Tags:
+        - Key: Name
+          Value: !Ref 'StackTagName'
+  NetworkLoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateNetworkLoadBalancerResources
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckProtocol: TCP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Ref 'AWS::StackName'
+      Port: !Ref 'ContainerLoadBalancerPort'
+      Protocol: TCP
+      UnhealthyThresholdCount: 2
+      VpcId: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - VPCId
+      Tags:
+        - Key: Name
+          Value: !Ref 'StackTagName'
+  NetworkLoadBalancerTargetListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateNetworkLoadBalancerResources
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'NetworkLoadBalancerTargetGroup'
+          Type: forward
+      LoadBalancerArn: !Ref 'NetworkLoadBalancer'
+      Port: 443
+      Protocol: TCP
+  NetworkLoadBalancerRecordSet:
+    Type: AWS::Route53::RecordSet
+    Condition: CreateNetworkLoadBalancerResources
+    Properties:
+      HostedZoneName: !Ref 'HostedZoneName'
+      Comment: DNS name for a network load balancer service.
+      Name: !Ref 'RecordSetName'
+      Type: A
+      AliasTarget:
+        HostedZoneId: !GetAtt 'NetworkLoadBalancer.CanonicalHostedZoneID'
+        DNSName: !GetAtt 'NetworkLoadBalancer.DNSName'
+  ExternalApplicationLoadBalancerService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ApplicationLoadBalancerRule
+    Condition: CreateApplicationLoadBalancerResources
+    Properties:
+      ServiceName: !Ref 'ServiceName'
+      HealthCheckGracePeriodSeconds: 60
+      Cluster: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - ClusterName
+      LaunchType: FARGATE
+      ServiceRegistries:
+        - RegistryArn: !GetAtt 'ServiceDiscoveryRecord.Arn'
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: !Ref 'DesiredCount'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - FargateContainerSecurityGroup
+          Subnets:
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - PublicSubnetOne
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - PublicSubnetTwo
+      TaskDefinition: !Ref 'TaskDefinition'
+      LoadBalancers:
+        - ContainerName: !Ref 'ServiceName'
+          ContainerPort: !Ref 'ContainerLoadBalancerPort'
+          TargetGroupArn: !Ref 'ApplicationLoadBalancerTargetGroup'
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: CreateApplicationLoadBalancerResources
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '120'
+      Subnets:
+        - !ImportValue
+          Fn::Join:
+            - ':'
+            - - !Ref 'ParentNetStackName'
+              - PublicSubnetOne
+        - !ImportValue
+          Fn::Join:
+            - ':'
+            - - !Ref 'ParentNetStackName'
+              - PublicSubnetTwo
+      SecurityGroups:
+        - !Ref 'ApplicationLoadBalancerSecurityGroup'
+      Tags:
+        - Key: Name
+          Value: !Ref 'StackTagName'
+  ApplicationLoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateApplicationLoadBalancerResources
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: !Ref 'ALBTargetGroupHealthCheckPath'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Ref 'AWS::StackName'
+      Port: !Ref 'ContainerLoadBalancerPort'
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - VPCId
+      Tags:
+        - Key: Name
+          Value: !Ref 'StackTagName'
+  ApplicationLoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: CreateApplicationLoadBalancerResources
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'ApplicationLoadBalancerTargetGroup'
+          Type: forward
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - !Ref 'ALBForwardPath'
+      ListenerArn: !Ref 'ApplicationLoadBalancerListener'
+      Priority: !Ref 'ALBPriority'
+  ApplicationLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateApplicationLoadBalancerResources
+    DependsOn:
+      - ApplicationLoadBalancer
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref 'SSLCertificateARN'
+      DefaultActions:
+        - TargetGroupArn: !Ref 'ApplicationLoadBalancerTargetGroup'
+          Type: forward
+      LoadBalancerArn: !Ref 'ApplicationLoadBalancer'
+      Port: 443
+      Protocol: HTTPS
+  EcsSecurityGroupIngressFromApplicationALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateApplicationLoadBalancerResources
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - FargateContainerSecurityGroup
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref 'ApplicationLoadBalancerSecurityGroup'
+      Tags:
+        - Key: Name
+          Value: !Ref 'StackTagName'
+  ApplicationLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateApplicationLoadBalancerResources
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - VPCId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: '0.0.0.0/0'
+      Tags:
+        - Key: Name
+          Value: !Ref 'StackTagName'
+  ApplicationLoadBalancerRecordSet:
+    Type: AWS::Route53::RecordSet
+    Condition: CreateApplicationLoadBalancerResources
+    Properties:
+      HostedZoneName: !Ref 'HostedZoneName'
+      Comment: DNS name for a network load balancer service.
+      Name: !Ref 'RecordSetName'
+      Type: A
+      AliasTarget:
+        HostedZoneId: !GetAtt 'ApplicationLoadBalancer.CanonicalHostedZoneID'
+        DNSName: !GetAtt 'ApplicationLoadBalancer.DNSName'
+  InternalService:
+    Type: AWS::ECS::Service
+    Condition: InternalService
+    Properties:
+      ServiceName: !Ref 'ServiceName'
+      Cluster: !ImportValue
+        Fn::Join:
+          - ':'
+          - - !Ref 'ParentNetStackName'
+            - ClusterName
+      LaunchType: FARGATE
+      ServiceRegistries:
+        - RegistryArn: !GetAtt 'ServiceDiscoveryRecord.Arn'
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: !Ref 'DesiredCount'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - FargateContainerSecurityGroup
+          Subnets:
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - PublicSubnetOne
+            - !ImportValue
+              Fn::Join:
+                - ':'
+                - - !Ref 'ParentNetStackName'
+                  - PublicSubnetTwo
+      TaskDefinition: !Ref 'TaskDefinition'
+  ServiceDiscoveryRecord:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      DnsConfig:
+        NamespaceId: !ImportValue
+          Fn::Join:
+            - ':'
+            - - !Ref 'ParentNetStackName'
+              - ServiceDiscoveryPrivateDnsNamespaceId
+        DnsRecords:
+          - Type: A
+            TTL: 10
+      Name: !Ref 'ServiceName'
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
